@@ -1,0 +1,157 @@
+name: wager
+
+x-app-env: &app-env
+  APP_ENV: local
+  LOG_LEVEL: info
+  HTTP_ADDR: ":8080"
+  POSTGRES_DSN: postgres://wager:wager@postgres:5432/wager?sslmode=disable
+  POSTGRES_MAX_CONNS: "10"
+  AWS_REGION: us-east-1
+  AWS_ACCESS_KEY_ID: test
+  AWS_SECRET_ACCESS_KEY: test
+  SQS_ENDPOINT: http://ministack:4566
+  SQS_QUEUE_NAME: wager-transactions.fifo
+  SQS_DLQ_NAME: wager-transactions-dlq.fifo
+  # Consumidor da fila de entrada. CONSUMER_MAX_RECEIVE_COUNT precisa casar com o
+  # maxReceiveCount do redrive em docs/init/ministack/01-queues.sh.
+  CONSUMER_ENABLED: "true"
+  CONSUMER_NAME: wager-transactions
+  CONSUMER_MAX_MESSAGES: "10"
+  CONSUMER_WAIT_TIME: 20s
+  CONSUMER_VISIBILITY_TIMEOUT: 30s
+  CONSUMER_MAX_RECEIVE_COUNT: "5"
+  CONSUMER_BASE_BACKOFF: 2s
+  CONSUMER_SHUTDOWN_GRACE: 15s
+  # Worker de retomada de PENDING_REFERENCE.
+  REFERENCE_ENABLED: "true"
+  REFERENCE_INTERVAL: 1s
+  REFERENCE_ERROR_BACKOFF: 2s
+  REFERENCE_MAX_ATTEMPTS: "8"
+  REFERENCE_TTL: 24h
+  REFERENCE_BASE_BACKOFF: 5s
+  REFERENCE_MAX_BACKOFF: 15m
+  AUTH_MODE: oidc
+  # A porta do Keycloak no host precisa ser livre (8080 costuma estar ocupada).
+  # O issuer acompanha a porta, pois o `iss` do token é gerado pelo KC_HOSTNAME.
+  OIDC_ISSUER: http://localhost:${KEYCLOAK_HOST_PORT:-8080}/realms/wager
+  # Backchannel: por dentro da rede docker o Keycloak responde em keycloak:8080,
+  # enquanto o `iss` do token continua sendo a URL de frontend (localhost:8080).
+  # Como o OIDC_JWKS_URL é explícito, não há descoberta nem desencontro de host.
+  OIDC_JWKS_URL: http://keycloak:8080/realms/wager/protocol/openid-connect/certs
+  OIDC_TOKEN_URL: http://localhost:${KEYCLOAK_HOST_PORT:-8080}/realms/wager/protocol/openid-connect/token
+  OIDC_AUDIENCE: wager-api
+
+x-app-base: &app-base
+  build:
+    context: .
+    dockerfile: Dockerfile
+  depends_on:
+    postgres:
+      condition: service_healthy
+    # service_healthy (e não service_started): o publisher valida a fila no
+    # startup, então o broker precisa estar pronto, não apenas iniciado.
+    ministack:
+      condition: service_healthy
+    keycloak:
+      condition: service_started
+    migrate:
+      condition: service_completed_successfully
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: wager-postgres
+    environment:
+      POSTGRES_USER: wager
+      POSTGRES_PASSWORD: wager
+      POSTGRES_DB: wager
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    ports:
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wager -d wager"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  ministack:
+    image: ministackorg/ministack:latest
+    container_name: wager-ministack
+    ports:
+      - "4566:4566"
+    environment:
+      PERSIST_STATE: "1"
+      AUTH: "false"
+      AWS_DEFAULT_REGION: us-east-1
+    volumes:
+      - ./docs/init/ministack:/etc/localstack/init/ready.d:ro
+      - ministack-state:/tmp/ministack-state
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    container_name: wager-keycloak
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HOSTNAME: http://localhost:${KEYCLOAK_HOST_PORT:-8080}
+      KC_HOSTNAME_STRICT: "false"
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "${KEYCLOAK_HOST_PORT:-8080}:8080"
+    volumes:
+      - ./docs/init/keycloak:/opt/keycloak/data/import:ro
+    # Sem healthcheck: a imagem do Keycloak é UBI-micro (sem shell/curl). A
+    # espera pelo IdP acontece na aplicação, que aguarda o JWKS no startup.
+    restart: unless-stopped
+
+  # Serviço de vida curta: aplica as migrations e encerra. As aplicações só
+  # sobem depois que ele termina com sucesso.
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: wager-migrate
+    entrypoint: ["/migrate"]
+    command: ["up"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *app-env
+
+  app1:
+    <<: *app-base
+    container_name: wager-app1
+    environment:
+      <<: *app-env
+      INSTANCE_ID: app1
+    ports:
+      - "8081:8080"
+
+  app2:
+    <<: *app-base
+    container_name: wager-app2
+    environment:
+      <<: *app-env
+      INSTANCE_ID: app2
+    ports:
+      - "8082:8080"
+
+  app3:
+    <<: *app-base
+    container_name: wager-app3
+    environment:
+      <<: *app-env
+      INSTANCE_ID: app3
+    ports:
+      - "8083:8080"
+
+volumes:
+  pgdata:
+  ministack-state:

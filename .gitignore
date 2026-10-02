@@ -1,0 +1,23 @@
+# Ambiente
+.env
+.env.local
+
+# Binários / artefatos de build
+bin/
+dist/
+/api
+*.out
+coverage.*
+
+# Testes / perfis
+*.test
+*.prof
+
+# Estado local do MiniStack (PERSIST_STATE=1)
+data/
+
+# Editores
+.idea/
+.vscode/
+*.swp
+.DS_Store

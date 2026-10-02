@@ -1,0 +1,12 @@
+.git
+.gitignore
+bin
+dist
+*.out
+*.test
+.env
+.env.*
+data
+docs
+README.md
+ARCHITECTURE.md
